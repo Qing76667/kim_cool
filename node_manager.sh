@@ -123,9 +123,13 @@ add_node() {
         return
     fi
 
-    read -p "API_URL: " API_URL
-    read -p "CHANGE_IP_URL: " CHANGE_IP_URL
-    read -p "节点域名: " DOMAIN
+echo ""
+echo "接口配置（请填写节点 API 信息）"
+echo "--------------------------------"
+
+read -p "获取IP接口 (API_URL): " API_URL
+read -p "切换IP接口 (CHANGE_IP_URL): " CHANGE_IP_URL
+read -p "节点域名 (DOMAIN): " DOMAIN
 
     cat > "$FILE" <<EOF
 NODE="$NODE"
