@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "========== SOCKS5 通用稳定版 =========="
+echo "========== Kim SOCKS5通用版 =========="
 
 read -p "端口 (默认 985): " PORT
 PORT=${PORT:-985}
