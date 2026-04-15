@@ -192,7 +192,7 @@ cat >> "$TMP_CONF" <<EOF
       NodeID: $NODE_ID
       NodeType: $NODE_TYPE
       Timeout: 30
-      EnableVless: false
+      EnableVless: true
       VlessFlow: "xtls-rprx-vision"
       SpeedLimit: 0
       DeviceLimit: 0
