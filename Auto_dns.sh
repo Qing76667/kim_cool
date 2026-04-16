@@ -38,7 +38,7 @@ get_ip() {
 
 # ================= 国内检测 =================
 check_cn() {
-    HTTP=$(curl -s -o /tmp/${NODE}_cn.txt -w "%{http_code}" --max-time 6 "$CN_CHECK")
+    HTTP=$(curl -s -o /tmp/${NODE}_cn.txt -w "%{http_code}" --max-time 10 "$CN_CHECK")
     RESULT=$(cat /tmp/${NODE}_cn.txt 2>/dev/null)
 
     if [ "$HTTP" = "000" ] || [ -z "$RESULT" ]; then
