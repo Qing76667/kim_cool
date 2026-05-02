@@ -178,21 +178,26 @@ add_node(){
     NODE_TYPE=${NODE_TYPE:-Vless}
 
     i=1
-    MAP=()
+    MAP_ID=()
+    MAP_NAME=()
 
     while IFS='|' read -r id name host key; do
         echo "$i) $name"
-        MAP[$i]="$id"
+        MAP_ID[$i]="$id"
+        MAP_NAME[$i]="$name"
         ((i++))
     done < "$PANEL_DB"
 
     read -p "选择面板: " sel
-    PANEL_ID="${MAP[$sel]}"
+
+    PANEL_ID="${MAP_ID[$sel]}"
+    PANEL_NAME="${MAP_NAME[$sel]}"
 
     [ -z "$PANEL_ID" ] && err "取消" && return
 
-    # echo "${NODE_ID}|${NODE_TYPE}|${PANEL_ID}" >> "$DATA" 原写法
-    append_node "${NODE_ID}|${NODE_TYPE}|${PANEL_ID}"
+    # ✅ 统一：写入 panel_name
+    append_node "${NODE_ID}|${NODE_TYPE}|${PANEL_NAME}"
+
     ok "添加成功"
 }
 
