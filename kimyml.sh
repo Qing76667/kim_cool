@@ -4,159 +4,377 @@ BASE_DIR="/etc/XrayR"
 CONF="$BASE_DIR/config.yml"
 TMP_CONF="$BASE_DIR/config.yml.tmp"
 DATA="$BASE_DIR/nodes.db"
-BASE_CONF="$BASE_DIR/base.conf"
+PANEL_DB="$BASE_DIR/panels.db"
 BACKUP_DIR="$BASE_DIR/backup"
 
 mkdir -p "$BASE_DIR" "$BACKUP_DIR"
 [ ! -f "$DATA" ] && touch "$DATA"
+[ ! -f "$PANEL_DB" ] && touch "$PANEL_DB"
 
 # =========================
-# 颜色UI（兼容终端）
+# UI
 # =========================
 RED="\033[31m"
 GREEN="\033[32m"
 YELLOW="\033[33m"
 BLUE="\033[34m"
-CYAN="\033[36m"
 RESET="\033[0m"
 
-ok() { echo -e "${GREEN}[成功] $1${RESET}"; }
-err() { echo -e "${RED}[错误] $1${RESET}"; }
-warn() { echo -e "${YELLOW}[警告] $1${RESET}"; }
-info() { echo -e "${CYAN}[信息] $1${RESET}"; }
+ok(){ echo -e "${GREEN}[成功] $1${RESET}"; }
+err(){ echo -e "${RED}[错误] $1${RESET}"; }
+warn(){ echo -e "${YELLOW}[提示] $1${RESET}"; }
+info(){ echo -e "${BLUE}[信息] $1${RESET}"; }
 
-section() {
+section(){
     echo -e "${BLUE}====================================${RESET}"
     echo -e "${BLUE}$1${RESET}"
     echo -e "${BLUE}====================================${RESET}"
 }
 
 # =========================
-# API 配置
+# 基础函数
 # =========================
-read_base() {
-    if [ ! -f "$BASE_CONF" ]; then
-        echo "首次配置 API"
-        read -p "请输入 ApiHost: " API_HOST
-        read -p "请输入 ApiKey: " API_KEY
-        save_base
-    fi
-    source "$BASE_CONF"
-}
-
-save_base() {
-cat > "$BASE_CONF" <<EOF
-API_HOST="$API_HOST"
-API_KEY="$API_KEY"
-EOF
-}
-
-reset_api() {
-    echo ""
-    section "重新设置 API"
-    read -p "请输入 ApiHost: " API_HOST
-    read -p "请输入 ApiKey: " API_KEY
-    save_base
-    ok "API 已更新"
-}
-
-# =========================
-# 节点管理
-# =========================
-list_nodes() {
-    echo ""
-    section "节点列表"
-
-    if [ ! -s "$DATA" ]; then
-        warn "当前没有节点"
-        return
-    fi
-
-    while IFS='|' read -r id type panel; do
-        echo -e "${GREEN}NodeID:${RESET} $id"
-        echo -e "${BLUE}节点类型:${RESET} $type"
-        echo -e "${YELLOW}面板类型:${RESET} $panel"
-        echo "------------------------------------"
-    done < "$DATA"
-}
-
-add_node() {
-    echo ""
-    section "添加节点"
-
-    read -p "请输入 NodeID: " NODE_ID
-
-    if grep -q "^${NODE_ID}|" "$DATA"; then
-        err "该 NodeID 已存在"
-        return
-    fi
-
-    read -p "请输入节点类型 (默认 Vless): " NODE_TYPE
-    NODE_TYPE=${NODE_TYPE:-Vless}
-
-    read -p "请输入面板类型 (默认 NewV2board): " PANEL_TYPE
-    PANEL_TYPE=${PANEL_TYPE:-NewV2board}
-
-    echo "${NODE_ID}|${NODE_TYPE}|${PANEL_TYPE}" >> "$DATA"
-
-    ok "节点添加成功"
-}
-
-del_node() {
-    echo ""
-    section "删除节点"
-
-    list_nodes
-    read -p "请输入要删除的 NodeID: " ID
-
-    sed -i "/^${ID}|/d" "$DATA"
-
-    ok "节点已删除"
-}
-
-# =========================
-# 备份 / 回滚
-# =========================
-backup_config() {
+backup_config(){
     BACKUP_FILE="$BACKUP_DIR/config.yml.$(date +%F_%H-%M-%S)"
     cp "$CONF" "$BACKUP_FILE" 2>/dev/null
     echo "$BACKUP_FILE" > "$BACKUP_DIR/latest"
 }
 
-rollback_last() {
-    if [ ! -f "$BACKUP_DIR/latest" ]; then
-        err "没有可回滚的备份"
-        return 1
-    fi
-
-    LAST=$(cat "$BACKUP_DIR/latest")
-
-    if [ ! -f "$LAST" ]; then
-        err "备份文件不存在"
-        return 1
-    fi
-
-    cp "$LAST" "$CONF"
-    warn "已回滚到上一个版本"
-
+rollback_last(){
+    [ ! -f "$BACKUP_DIR/latest" ] && err "无备份" && return
+    cp "$(cat "$BACKUP_DIR/latest")" "$CONF"
     systemctl restart XrayR
+    warn "已回滚"
+}
+
+get_panel_name(){
+    awk -F'|' -v name="$1" '$2==name {print $2}' "$PANEL_DB"
+}
+
+get_panel_info(){
+    awk -F'|' -v name="$1" '$2==name {print $0}' "$PANEL_DB"
+}
+
+append_node(){
+    local line="$1"
+
+    grep -Fxq "$line" "$DATA" && return
+    echo "$line" >> "$DATA"
+}
+
+get_panel_id_by_name(){
+    awk -F'|' -v name="$1" '$2==name {print $1; exit}' "$PANEL_DB"
 }
 
 # =========================
-# YAML 校验
+# API（自动识别核心）
 # =========================
-validate_yaml() {
-    grep -q "^Nodes:" "$TMP_CONF"
+fetch_node_api(){
+    local HOST="$1"
+    local KEY="$2"
+    local NODEID="$3"
+
+    curl -s -H "X-API-Key: $KEY" "$HOST/api/node/$NODEID" 2>/dev/null
 }
 
 # =========================
-# 生成配置
+# 面板管理
 # =========================
-generate_config() {
+add_panel(){
+    section "添加面板"
 
-    read_base
+    # =========================
+    # 名称
+    # =========================
+    while true; do
+        read -p "名称: " NAME
+        NAME=$(echo "$NAME" | xargs)
 
-    info "开始生成配置..."
+        [ -z "$NAME" ] && err "名称不能为空" && continue
+        break
+    done
+
+    # =========================
+    # ApiHost
+    # =========================
+    while true; do
+        read -p "ApiHost: " HOST
+        HOST=$(echo "$HOST" | xargs)
+
+        [ -z "$HOST" ] && err "ApiHost不能为空" && continue
+        break
+    done
+
+    # =========================
+    # ApiKey
+    # =========================
+    while true; do
+        read -p "ApiKey: " KEY
+        KEY=$(echo "$KEY" | xargs)
+
+        [ -z "$KEY" ] && err "ApiKey不能为空" && continue
+        break
+    done
+
+    # =========================
+    # PID生成
+    # =========================
+    PID=$(awk -F'|' '{print $1}' "$PANEL_DB" | sort -n | tail -1)
+    PID=$((PID+1))
+
+    echo "${PID}|${NAME}|${HOST}|${KEY}" >> "$PANEL_DB"
+    ok "已添加"
+}
+
+list_panels(){
+    section "面板列表"
+
+    i=1
+    while IFS='|' read -r id name host key; do
+        echo "$i) $name | $host | $key"
+        ((i++))
+    done < "$PANEL_DB"
+}
+
+edit_panel(){
+    section "编辑面板"
+
+    i=1
+    MAP=()
+
+    while IFS='|' read -r id name host key; do
+        echo "$i) $name"
+        MAP[$i]="$id"
+        ((i++))
+    done < "$PANEL_DB"
+
+    read -p "选择面板: " sel
+    PID="${MAP[$sel]}"
+    [ -z "$PID" ] && err "取消" && return
+
+    panel=$(grep "^$PID|" "$PANEL_DB")
+    IFS='|' read -r id name host key <<< "$panel"
+
+    read -p "ApiHost(回车不改): " new_host
+    read -p "ApiKey(回车不改): " new_key
+
+    [ -z "$new_host" ] && new_host="$host"
+    [ -z "$new_key" ] && new_key="$key"
+
+    sed -i "/^$PID|/d" "$PANEL_DB"
+    echo "${PID}|${name}|${new_host}|${new_key}" >> "$PANEL_DB"
+
+    ok "更新成功"
+}
+
+# =========================
+# 节点管理
+# =========================
+add_node(){
+    section "添加节点"
+
+    read -p "NodeID: " NODE_ID
+    read -p "类型(Vless): " NODE_TYPE
+    NODE_TYPE=${NODE_TYPE:-Vless}
+
+    i=1
+    MAP=()
+
+    while IFS='|' read -r id name host key; do
+        echo "$i) $name"
+        MAP[$i]="$id"
+        ((i++))
+    done < "$PANEL_DB"
+
+    read -p "选择面板: " sel
+    PANEL_ID="${MAP[$sel]}"
+
+    [ -z "$PANEL_ID" ] && err "取消" && return
+
+    # echo "${NODE_ID}|${NODE_TYPE}|${PANEL_ID}" >> "$DATA" 原写法
+    append_node "${NODE_ID}|${NODE_TYPE}|${PANEL_ID}"
+    ok "添加成功"
+}
+
+list_nodes(){
+
+    section "节点列表"
+
+    i=1
+
+    while IFS='|' read -r id type panel; do
+
+        # pname=$(get_panel_name "$panel")
+        pname="$panel"
+        echo "编号:$i | NodeID:$id | 类型:$type | 面板:${pname:-未知}"
+
+        ((i++))
+
+    done < "$DATA"
+}
+
+edit_node_panel(){
+
+    section "修改节点面板"
+
+count=0
+MAP=()
+
+while IFS='|' read -r id type panel; do
+
+    ((count++))
+
+    echo "$count) NodeID:$id | 类型:$type | 面板:$panel"
+    MAP[$count]="$id|$type|$panel"
+
+done < "$DATA"
+
+    echo "------------------------"
+    read -p "输入节点编号(1-${i-1}): " sel
+
+    node="${MAP[$sel]}"
+    [ -z "$node" ] && err "无效选择" && return
+
+    IFS='|' read -r id type old_panel <<< "$node"
+
+    echo ""
+    echo "当前面板: $old_panel"
+    echo ""
+
+    j=1
+    PMAP=()
+
+    while IFS='|' read -r pid name host key; do
+        echo "$j) $name"
+        PMAP[$j]="$pid"
+        ((j++))
+    done < "$PANEL_DB"
+
+    read -p "选择新面板(回车取消): " psel
+    new_panel="${PMAP[$psel]}"
+
+    [ -z "$new_panel" ] && warn "未修改" && return
+
+    # =========================
+    # 更新 nodes.db（只改面板字段）
+    # =========================
+    tmp="$DATA.tmp"
+    > "$tmp"
+
+    while IFS='|' read -r nid ntype npanel; do
+
+        if [ "$nid" = "$id" ]; then
+            echo "$nid|$ntype|$new_panel" >> "$tmp"
+        else
+            echo "$nid|$ntype|$npanel" >> "$tmp"
+        fi
+
+    done < "$DATA"
+
+    mv "$tmp" "$DATA"
+
+    ok "节点面板已更新"
+}
+
+del_node(){
+    list_nodes
+    read -p "要删除的节点编号: " num
+
+    tmp="$DATA.tmp"
+    > "$tmp"
+
+    i=0
+    while IFS='|' read -r id type panel; do
+        # ✅ 就加在这里（关键）
+        [ -z "$id" ] && continue
+        
+        ((i++))
+        [ "$i" = "$num" ] && continue
+        echo "$id|$type|$panel" >> "$tmp"
+    done < "$DATA"
+
+    mv "$tmp" "$DATA"
+    ok "删除成功"
+}
+
+# =========================
+# ⭐ 智能同步（API识别版）
+# =========================
+sync_nodes(){
+
+    section "同步节点（最终稳定快照版）"
+
+    TMP="$DATA.tmp"
+    > "$TMP"
+
+    # =========================
+    # 面板映射：ApiHost -> PanelName
+    # =========================
+    declare -A PANEL_MAP
+
+    while IFS='|' read -r id name host key; do
+        host=$(echo "$host" | tr -d '"' | tr -d '\r' | xargs)
+        PANEL_MAP["$host"]="$name"
+    done < "$PANEL_DB"
+
+    # =========================
+    # 解析 XrayR config
+    # =========================
+    NODE_ID=""
+    API_HOST=""
+
+    while IFS= read -r line; do
+
+        # NodeID
+        if echo "$line" | grep -q "NodeID"; then
+            NODE_ID=$(echo "$line" | grep -oE "[0-9]+")
+        fi
+
+        # ApiHost（关键修复）
+        if echo "$line" | grep -q "ApiHost"; then
+            API_HOST=$(echo "$line" \
+                | sed 's/.*ApiHost:[ ]*//' \
+                | tr -d '"' \
+                | tr -d '\r' \
+                | xargs)
+        fi
+
+        # =========================
+        # 写入临时快照
+        # =========================
+        if [ -n "$NODE_ID" ] && [ -n "$API_HOST" ]; then
+
+            PANEL_NAME="${PANEL_MAP[$API_HOST]}"
+
+            if [ -z "$PANEL_NAME" ]; then
+                PANEL_NAME="unknown"
+            fi
+
+            # echo "$NODE_ID|Vless|$PANEL_NAME" >> "$TMP"  原写法
+            grep -Fxq "$NODE_ID|Vless|$PANEL_NAME" "$TMP" && continue
+            echo "$NODE_ID|Vless|$PANEL_NAME" >> "$TMP"
+
+            warn "NodeID:$NODE_ID -> $PANEL_NAME"
+
+            NODE_ID=""
+            API_HOST=""
+        fi
+
+    done < "$CONF"
+
+    # =========================
+    # ⭐ 核心修复：完全快照覆盖（禁止追加）
+    # =========================
+    sort -u "$TMP" > "$DATA"
+
+    ok "同步完成（快照模式，已消除历史污染）"
+}
+# =========================
+# 生成配置（稳定版）
+# =========================
+generate_config(){
+
+    section "生成配置"
 
 cat > "$TMP_CONF" <<EOF
 Log:
@@ -179,13 +397,20 @@ ConnectionConfig:
 Nodes:
 EOF
 
-    while read -r line; do
-        [ -z "$line" ] && continue
+while IFS='|' read -r NODE_ID NODE_TYPE PANEL_NAME; do
 
-        IFS='|' read -r NODE_ID NODE_TYPE PANEL_TYPE <<< "$line"
+    PANEL_ID=$(get_panel_id_by_name "$PANEL_NAME")
+
+    [ -z "$PANEL_ID" ] && continue
+
+    panel=$(grep "^$PANEL_ID|" "$PANEL_DB")
+    IFS='|' read -r pid name API_HOST API_KEY <<< "$panel"
+
+        [ -z "$API_HOST" ] && continue
+        [ -z "$API_KEY" ] && continue
 
 cat >> "$TMP_CONF" <<EOF
-  - PanelType: "$PANEL_TYPE"
+  - PanelType: "NewV2board"
     ApiConfig:
       ApiHost: "$API_HOST"
       ApiKey: "$API_KEY"
@@ -242,9 +467,6 @@ cat >> "$TMP_CONF" <<EOF
         ServerNames:
           - www.amazon.com
         PrivateKey: YOUR_PRIVATE_KEY
-        MinClientVer:
-        MaxClientVer:
-        MaxTimeDiff: 0
         ShortIds:
           - ""
           - "0123456789abcdef"
@@ -259,72 +481,69 @@ cat >> "$TMP_CONF" <<EOF
         DNSEnv:
           ALICLOUD_ACCESS_KEY: aaa
           ALICLOUD_SECRET_KEY: bbb
-
+      
 EOF
-
-        echo "" >> "$TMP_CONF"
 
     done < "$DATA"
 
-    info "正在校验配置..."
+    echo "预览:"
+    head -n 20 "$TMP_CONF"
 
-    if ! validate_yaml; then
-        err "配置校验失败，正在回滚"
-        rm -f "$TMP_CONF"
-        rollback_last
-        return 1
-    fi
-
-    ok "配置校验通过"
-
-    mv "$TMP_CONF" "$CONF"
+    read -p "确认生成? (y/n): " c
+    [ "$c" != "y" ] && return
 
     backup_config
-
+    mv "$TMP_CONF" "$CONF"
     systemctl restart XrayR
 
-    ok "配置已更新并重启 XrayR"
+    ok "完成"
 }
 
 # =========================
-# 菜单
+# 主菜单（恢复完整）
 # =========================
-menu() {
+menu(){
 while true; do
 clear
 
-section "XrayR 配置管理工具"
+section "XrayR 管理系统"
 
-echo "节点管理"
-echo "  1) 添加节点"
-echo "  2) 删除节点"
-echo "  3) 查看节点"
+echo "================ 面板 ================="
+echo "1) 添加面板"
+echo "2) 查看面板"
+echo "3) 编辑面板"
 
 echo ""
-echo "系统功能"
-echo "  4) 生成配置"
-echo "  5) 重置 Api"
-echo "  0) 退出"
+echo "================ 节点 ================="
+echo "4) 添加节点"
+echo "5) 删除节点"
+echo "6) 查看节点"
+echo "7) 修改节点面板"
 
-echo "===================================="
-echo -e "${YELLOW}提示：添加/删除节点后都需要“生成配置”才会生效${RESET}"
-echo -e "${YELLOW}提示：如需修改ApiHost和ApiKey，请选择 重置Api${RESET}"
-echo "===================================="
+echo ""
+echo "================ 系统 ================="
+echo "8) 智能同步节点（API识别）"
+echo "9) 生成配置"
+echo "0) 退出"
 
-read -p "请选择操作: " c
+echo "======================================="
+
+read -p "选择: " c
 
 case $c in
-    1) add_node ;;
-    2) del_node ;;
-    3) list_nodes ;;
-    4) generate_config ;;
-    5) reset_api ;;
-    0) exit ;;
-    *) err "无效选项" ;;
+1) add_panel ;;
+2) list_panels ;;
+3) edit_panel ;;
+4) add_node ;;
+5) del_node ;;
+6) list_nodes ;;
+7) edit_node_panel ;;
+8) sync_nodes ;;
+9) generate_config ;;
+0) exit ;;
 esac
 
-echo ""
-read -p "按回车返回菜单..."
+read -p "回车继续..."
 done
 }
 
