@@ -230,7 +230,7 @@ while IFS='|' read -r id type panel; do
 done < "$DATA"
 
     echo "------------------------"
-    read -p "输入节点编号(1-${i-1}): " sel
+    read -p "输入节点编号(1-$count): " sel
 
     node="${MAP[$sel]}"
     [ -z "$node" ] && err "无效选择" && return
