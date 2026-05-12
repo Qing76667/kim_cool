@@ -18,8 +18,12 @@ get_iface() {
 # ===== 检查端口是否可用 =====
 check_port_free() {
     local PORT=$1
-    ss -lnt | awk '{print $4}' | grep -q ":$PORT$"
-    return $?
+    # 精确匹配本地端口，兼容 IPv4/IPv6
+    if ss -lnt | awk '{print $4}' | grep -Eq "[:.]$PORT$"; then
+        return 1   # 端口被占用
+    else
+        return 0   # 端口空闲
+    fi
 }
 
 # ===== 生成 Dante 配置 =====
@@ -57,14 +61,10 @@ EOF
     echo "$USER:$PASS" > "$BASE_DIR/danted_${PORT}.passwd"
 
     # 启动 Dante
-    if systemctl list-units --all | grep -q danted; then
-        pkill danted 2>/dev/null
-        /usr/sbin/danted -f "$CONF_FILE" &
-        echo "[INFO] Dante 端口 $PORT 已启动 (systemd 非严格管理)"
-    else
-        /usr/sbin/danted -f "$CONF_FILE" &
-        echo "[INFO] Dante 端口 $PORT 已启动"
-    fi
+    pkill -f "danted.*danted_${PORT}.conf" 2>/dev/null
+    /usr/sbin/danted -f "$CONF_FILE" &
+    sleep 1
+    ss -lntp | grep $PORT &>/dev/null && echo "[INFO] Dante 端口 $PORT 已启动" || echo "❌ Dante 启动失败，请检查配置"
 }
 
 # ===== 初始化安装 =====
@@ -75,10 +75,11 @@ initialize() {
     read -p "端口 (默认 $DEFAULT_PORT): " PORT
     PORT=${PORT:-$DEFAULT_PORT}
 
-    check_port_free $PORT && {
+    check_port_free $PORT
+    if [[ $? -eq 1 ]]; then
         echo "❌ 端口 $PORT 已被占用，请换一个端口"
         return
-    }
+    fi
 
     read -p "用户名 (默认 kim): " USER
     USER=${USER:-kim}
@@ -87,6 +88,7 @@ initialize() {
     PASS=${PASS:-aa123456}
 
     # 保存到数据库
+    [[ -f "$DB_FILE" ]] || touch "$DB_FILE"
     echo "$PORT|$USER|$PASS" >> "$DB_FILE"
 
     # 生成配置并启动
@@ -98,17 +100,22 @@ initialize() {
 # ===== 添加用户 =====
 add_user() {
     read -p "端口: " PORT
-    PORT=${PORT:-$DEFAULT_PORT}
+    [[ -z "$PORT" ]] && { echo "❌ 端口不能为空"; return; }
 
-    check_port_free $PORT || {
+    check_port_free $PORT
+    if [[ $? -eq 1 ]]; then
         echo "❌ 端口 $PORT 已被占用，请换一个端口"
         return
-    }
+    fi
 
     read -p "用户名: " USER
+    [[ -z "$USER" ]] && { echo "❌ 用户名不能为空"; return; }
+
     read -p "密码: " PASS
+    [[ -z "$PASS" ]] && { echo "❌ 密码不能为空"; return; }
 
     # 保存数据库
+    [[ -f "$DB_FILE" ]] || touch "$DB_FILE"
     echo "$PORT|$USER|$PASS" >> "$DB_FILE"
 
     # 生成配置并启动
@@ -123,7 +130,7 @@ del_user() {
     [[ -f "$BASE_DIR/danted_${PORT}.conf" ]] || { echo "❌ 端口 $PORT 未初始化"; return; }
 
     # 删除数据库记录
-    sed -i "/^$PORT|/d" "$DB_FILE"
+    [[ -f "$DB_FILE" ]] && sed -i "/^$PORT|/d" "$DB_FILE"
 
     # 删除配置和用户文件
     rm -f "$BASE_DIR/danted_${PORT}.conf"
