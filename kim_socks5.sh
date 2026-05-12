@@ -1,46 +1,39 @@
 #!/bin/bash
 
-BASE_DIR="/etc"
-DB_FILE="$BASE_DIR/kim_socks5.db"   # 存储端口|用户|密码
-DEFAULT_PORT=985
+echo "========== Kim SOCKS5通用版 =========="
 
-# ===== 安装依赖 =====
-install_dependencies() {
-    apt update -y
-    DEBIAN_FRONTEND=noninteractive apt install -y dante-server curl
-}
+read -p "端口 (默认 985): " PORT
+PORT=${PORT:-985}
 
-# ===== 检测默认网卡 =====
-get_iface() {
-    ip route | awk '/default/ {print $5; exit}'
-}
+read -p "用户名 (默认 kim): " USER
+USER=${USER:-kim}
 
-# ===== 检查端口是否可用 =====
-check_port_free() {
-    local PORT=$1
-    # 精确匹配本地端口，兼容 IPv4/IPv6
-    if ss -lnt | awk '{print $4}' | grep -Eq "[:.]$PORT$"; then
-        return 1   # 端口被占用
-    else
-        return 0   # 端口空闲
-    fi
-}
+read -p "密码 (默认 aa123456): " PASS
+PASS=${PASS:-aa123456}
 
-# ===== 生成 Dante 配置 =====
-generate_config() {
-    local PORT=$1
-    local USER=$2
-    local PASS=$3
-    local IFACE=$(get_iface)
-    local CONF_FILE="$BASE_DIR/danted_${PORT}.conf"
+echo "[INFO] 开始安装..."
 
-    cat > "$CONF_FILE" <<EOF
+apt update -y
+apt install -y dante-server curl
+
+# ===== 自动获取默认网卡（关键）=====
+IFACE=$(ip route | awk '/default/ {print $5; exit}')
+
+echo "[INFO] 检测网卡: $IFACE"
+
+# ===== 用户 =====
+id $USER >/dev/null 2>&1 || useradd -M -s /usr/sbin/nologin $USER
+echo "$USER:$PASS" | chpasswd
+
+# ===== 写配置（关键修复版）=====
+cat > /etc/danted.conf <<EOF
 logoutput: syslog
 
 internal: 0.0.0.0 port = $PORT
 external: $IFACE
 
 socksmethod: username
+
 user.privileged: root
 user.notprivileged: nobody
 
@@ -52,121 +45,17 @@ socks pass {
     from: 0.0.0.0/0 to: 0.0.0.0/0
     protocol: tcp udp
 }
-
-# 虚拟用户认证
-username: $BASE_DIR/danted_${PORT}.passwd
 EOF
 
-    # 写入用户文件
-    echo "$USER:$PASS" > "$BASE_DIR/danted_${PORT}.passwd"
+systemctl restart danted
+systemctl enable danted
 
-    # 启动 Dante
-    pkill -f "danted.*danted_${PORT}.conf" 2>/dev/null
-    /usr/sbin/danted -f "$CONF_FILE" &
-    sleep 1
-    ss -lntp | grep $PORT &>/dev/null && echo "[INFO] Dante 端口 $PORT 已启动" || echo "❌ Dante 启动失败，请检查配置"
-}
+echo "========== 状态 =========="
+ss -lntp | grep $PORT || echo "❌ 未监听"
 
-# ===== 初始化安装 =====
-initialize() {
-    echo "========== Kim SOCKS5 初始化 =========="
-    install_dependencies
+echo "IP: $(curl -s ifconfig.me)"
+echo "PORT: $PORT"
+echo "USER: $USER"
+echo "PASS: $PASS"
 
-    read -p "端口 (默认 $DEFAULT_PORT): " PORT
-    PORT=${PORT:-$DEFAULT_PORT}
-
-    check_port_free $PORT
-    if [[ $? -eq 1 ]]; then
-        echo "❌ 端口 $PORT 已被占用，请换一个端口"
-        return
-    fi
-
-    read -p "用户名 (默认 kim): " USER
-    USER=${USER:-kim}
-
-    read -p "密码 (默认 aa123456): " PASS
-    PASS=${PASS:-aa123456}
-
-    # 保存到数据库
-    [[ -f "$DB_FILE" ]] || touch "$DB_FILE"
-    echo "$PORT|$USER|$PASS" >> "$DB_FILE"
-
-    # 生成配置并启动
-    generate_config $PORT $USER $PASS
-
-    echo "✅ 初始化完成: 端口 $PORT 用户 $USER"
-}
-
-# ===== 添加用户 =====
-add_user() {
-    read -p "端口: " PORT
-    [[ -z "$PORT" ]] && { echo "❌ 端口不能为空"; return; }
-
-    check_port_free $PORT
-    if [[ $? -eq 1 ]]; then
-        echo "❌ 端口 $PORT 已被占用，请换一个端口"
-        return
-    fi
-
-    read -p "用户名: " USER
-    [[ -z "$USER" ]] && { echo "❌ 用户名不能为空"; return; }
-
-    read -p "密码: " PASS
-    [[ -z "$PASS" ]] && { echo "❌ 密码不能为空"; return; }
-
-    # 保存数据库
-    [[ -f "$DB_FILE" ]] || touch "$DB_FILE"
-    echo "$PORT|$USER|$PASS" >> "$DB_FILE"
-
-    # 生成配置并启动
-    generate_config $PORT $USER $PASS
-
-    echo "✅ 用户 $USER 添加成功，端口 $PORT"
-}
-
-# ===== 删除用户 =====
-del_user() {
-    read -p "端口: " PORT
-    [[ -f "$BASE_DIR/danted_${PORT}.conf" ]] || { echo "❌ 端口 $PORT 未初始化"; return; }
-
-    # 删除数据库记录
-    [[ -f "$DB_FILE" ]] && sed -i "/^$PORT|/d" "$DB_FILE"
-
-    # 删除配置和用户文件
-    rm -f "$BASE_DIR/danted_${PORT}.conf"
-    rm -f "$BASE_DIR/danted_${PORT}.passwd"
-
-    # 杀掉 Dante 进程
-    pkill -f "danted.*danted_${PORT}.conf" 2>/dev/null
-
-    echo "✅ 端口 $PORT 用户已删除"
-}
-
-# ===== 列出所有用户 =====
-list_users() {
-    echo "========== SOCKS5 用户列表 =========="
-    [[ -f "$DB_FILE" ]] || { echo "❌ 没有用户"; return; }
-    awk -F'|' '{printf "端口: %-6s 用户: %-10s 密码: %s\n",$1,$2,$3}' "$DB_FILE"
-    echo "===================================="
-}
-
-# ===== 主菜单 =====
-while true; do
-    echo
-    echo "========== Kim SOCKS5 管理 =========="
-    echo "1) 初始化安装/初始化端口"
-    echo "2) 添加用户（新端口+用户）"
-    echo "3) 删除用户（按端口）"
-    echo "4) 列出用户"
-    echo "5) 退出"
-    echo "====================================="
-    read -p "选择操作: " CHOICE
-    case $CHOICE in
-        1) initialize ;;
-        2) add_user ;;
-        3) del_user ;;
-        4) list_users ;;
-        5) exit ;;
-        *) echo "❌ 无效选项" ;;
-    esac
-done
+echo "========== 完成 =========="
