@@ -1,16 +1,11 @@
 #!/bin/bash
 
 # =========================
-# Kim SOCKS5 多用户管理脚本
+# Kim SOCKS5 多用户管理脚本（按端口）
 # =========================
 
-DANTE_CONF="/etc/danted.conf"
-PASSWD_FILE="/etc/danted.passwd"
-PORT_FILE="/etc/danted_port"
+BASE_DIR="/etc"
 DEFAULT_PORT=985
-
-# ===== 获取默认网卡 =====
-IFACE=$(ip route | awk '/default/ {print $5; exit}')
 
 # ===== 安装依赖 =====
 install_dependencies() {
@@ -18,13 +13,22 @@ install_dependencies() {
     apt install -y dante-server curl
 }
 
-# ===== 生成/更新 Dante 配置 =====
+# ===== 检测默认网卡 =====
+get_iface() {
+    ip route | awk '/default/ {print $5; exit}'
+}
+
+# ===== 生成配置 =====
 generate_config() {
-    local port=$1
-    cat > "$DANTE_CONF" <<EOF
+    local PORT=$1
+    local IFACE=$2
+    local CONF_FILE="$BASE_DIR/danted_${PORT}.conf"
+    local PASSWD_FILE="$BASE_DIR/danted_${PORT}.passwd"
+
+    cat > "$CONF_FILE" <<EOF
 logoutput: syslog
 
-internal: 0.0.0.0 port = $port
+internal: 0.0.0.0 port = $PORT
 external: $IFACE
 
 socksmethod: username
@@ -44,93 +48,151 @@ socks pass {
 username: $PASSWD_FILE
 EOF
 
-    systemctl restart danted
-    systemctl enable danted
-    echo "$port" > "$PORT_FILE"
+    # 启动 Dante
+    if systemctl list-units --all | grep -q danted; then
+        systemctl restart danted
+        systemctl enable danted
+        echo "[INFO] Dante 服务已启动 (systemd)"
+    else
+        echo "[INFO] systemd 未找到，直接启动 Dante 进程"
+        pkill danted 2>/dev/null
+        /usr/sbin/danted -f "$CONF_FILE" &
+    fi
 }
 
-# ===== 显示当前端口 =====
-show_port() {
-    if [[ -f "$PORT_FILE" ]]; then
-        cat "$PORT_FILE"
-    else
-        echo "$DEFAULT_PORT"
-    fi
+# ===== 初始化端口 =====
+initialize() {
+    echo "========== 初始化 Kim SOCKS5 =========="
+    read -p "端口 (默认 $DEFAULT_PORT): " PORT
+    PORT=${PORT:-$DEFAULT_PORT}
+
+    read -p "初始用户名 (默认 kim): " USER
+    USER=${USER:-kim}
+
+    read -p "初始密码 (默认 aa123456): " PASS
+    PASS=${PASS:-aa123456}
+
+    install_dependencies
+    IFACE=$(get_iface)
+
+    # 创建用户文件
+    PASSWD_FILE="$BASE_DIR/danted_${PORT}.passwd"
+    echo "$USER:$PASS" > "$PASSWD_FILE"
+
+    generate_config $PORT $IFACE
+
+    echo "========== 初始化完成 =========="
+    echo "IP: $(curl -s ifconfig.me)"
+    echo "PORT: $PORT"
+    echo "USER: $USER"
+    echo "PASS: $PASS"
 }
 
 # ===== 添加用户 =====
 add_user() {
-    read -p "用户名: " U
-    read -p "密码: " P
+    read -p "端口: " PORT
+    PORT=${PORT:-$DEFAULT_PORT}
+    PASSWD_FILE="$BASE_DIR/danted_${PORT}.passwd"
+    IFACE=$(get_iface)
 
-    # 检查是否存在
-    if grep -q "^$U:" "$PASSWD_FILE" 2>/dev/null; then
-        echo "❌ 用户已存在！"
+    if [[ ! -f "$PASSWD_FILE" ]]; then
+        echo "❌ 端口 $PORT 未初始化，请先初始化"
         return
     fi
 
-    # 添加
+    read -p "用户名: " U
+    read -p "密码: " P
+
+    if grep -q "^$U:" "$PASSWD_FILE" 2>/dev/null; then
+        echo "❌ 用户已存在"
+        return
+    fi
+
     echo "$U:$P" >> "$PASSWD_FILE"
-    generate_config $(show_port)
-    echo "✅ 用户 $U 已添加"
+    generate_config $PORT $IFACE
+    echo "✅ 用户 $U 已添加到端口 $PORT"
 }
 
 # ===== 删除用户 =====
 del_user() {
+    read -p "端口: " PORT
+    PORT=${PORT:-$DEFAULT_PORT}
+    PASSWD_FILE="$BASE_DIR/danted_${PORT}.passwd"
+    IFACE=$(get_iface)
+
+    if [[ ! -f "$PASSWD_FILE" ]]; then
+        echo "❌ 端口 $PORT 未初始化"
+        return
+    fi
+
     read -p "用户名: " U
 
     if ! grep -q "^$U:" "$PASSWD_FILE" 2>/dev/null; then
-        echo "❌ 用户不存在！"
+        echo "❌ 用户不存在"
         return
     fi
 
     sed -i "/^$U:/d" "$PASSWD_FILE"
-    generate_config $(show_port)
-    echo "✅ 用户 $U 已删除"
+    generate_config $PORT $IFACE
+    echo "✅ 用户 $U 已从端口 $PORT 删除"
 }
 
 # ===== 列出用户 =====
 list_users() {
-    echo "========== SOCKS5 用户列表 =========="
+    read -p "端口: " PORT
+    PORT=${PORT:-$DEFAULT_PORT}
+    PASSWD_FILE="$BASE_DIR/danted_${PORT}.passwd"
+
+    echo "========== 用户列表 (端口 $PORT) =========="
     if [[ -f "$PASSWD_FILE" ]]; then
         awk -F: '{print $1}' "$PASSWD_FILE"
     else
-        echo "❌ 暂无用户"
+        echo "❌ 无用户或端口未初始化"
     fi
-    echo "端口: $(show_port)"
-    echo "IP: $(curl -s ifconfig.me)"
-    echo "====================================="
+    echo "========================================="
 }
 
 # ===== 修改端口 =====
 set_port() {
-    read -p "输入端口 (当前: $(show_port)): " PORT
-    PORT=${PORT:-$(show_port)}
-    generate_config $PORT
-    echo "✅ 端口已更新为 $PORT"
+    read -p "当前端口: " OLD_PORT
+    OLD_PORT=${OLD_PORT:-$DEFAULT_PORT}
+    OLD_PASSWD="$BASE_DIR/danted_${OLD_PORT}.passwd"
+    OLD_CONF="$BASE_DIR/danted_${OLD_PORT}.conf"
+    IFACE=$(get_iface)
+
+    if [[ ! -f "$OLD_PASSWD" ]]; then
+        echo "❌ 端口 $OLD_PORT 未初始化"
+        return
+    fi
+
+    read -p "新端口: " NEW_PORT
+    NEW_PORT=${NEW_PORT:-$OLD_PORT}
+
+    # 拷贝用户文件到新端口
+    cp "$OLD_PASSWD" "$BASE_DIR/danted_${NEW_PORT}.passwd"
+    generate_config $NEW_PORT $IFACE
+
+    echo "✅ 已为新端口 $NEW_PORT 生成配置，用户与旧端口相同"
 }
 
 # ===== 主菜单 =====
 while true; do
     echo
     echo "========== Kim SOCKS5 管理 =========="
-    echo "1) 添加用户"
-    echo "2) 删除用户"
-    echo "3) 列出用户"
-    echo "4) 设置端口"
-    echo "5) 安装依赖并初始化"
+    echo "1) 初始化安装/初始化端口"
+    echo "2) 添加用户"
+    echo "3) 删除用户"
+    echo "4) 列出用户"
+    echo "5) 设置/迁移端口"
     echo "6) 退出"
     echo "====================================="
     read -p "选择操作: " CHOICE
     case $CHOICE in
-        1) add_user ;;
-        2) del_user ;;
-        3) list_users ;;
-        4) set_port ;;
-        5) install_dependencies
-           generate_config $(show_port)
-           echo "✅ 初始化完成"
-           ;;
+        1) initialize ;;
+        2) add_user ;;
+        3) del_user ;;
+        4) list_users ;;
+        5) set_port ;;
         6) exit ;;
         *) echo "❌ 无效选项" ;;
     esac
